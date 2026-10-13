@@ -5,49 +5,63 @@ import makeWASocket, {
   Browsers,
 } from '@whiskeysockets/baileys'
 import pino from 'pino'
+import http from 'http'
+import QRCode from 'qrcode'
 
 const KEYWORD = (process.env.KEYWORD || 'changeme').toLowerCase()
-const PHONE = (process.env.PHONE_NUMBER || '').replace(/\D/g, '')
 const AUTH_DIR = process.env.AUTH_DIR || './auth'
+const PORT = process.env.PORT || 3000
+
+let latestQR = null
+let connected = false
+
+// Tiny web page that shows the QR code
+http
+  .createServer(async (req, res) => {
+    res.setHeader('Content-Type', 'text/html')
+    if (connected) {
+      res.end('<h2>Connected to WhatsApp. You can close this page.</h2>')
+    } else if (latestQR) {
+      const img = await QRCode.toDataURL(latestQR, { width: 320 })
+      res.end(
+        `<meta http-equiv="refresh" content="5">
+         <h2>Scan this in WhatsApp > Linked devices > Link a device</h2>
+         <img src="${img}">`
+      )
+    } else {
+      res.end('<meta http-equiv="refresh" content="3"><h2>Starting... wait a few seconds</h2>')
+    }
+  })
+  .listen(PORT, () => console.log('Web page running on port', PORT))
 
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
   const { version } = await fetchLatestBaileysVersion()
-  let pairingRequested = false
 
   const sock = makeWASocket({
     version,
     auth: state,
     logger: pino({ level: 'silent' }),
     browser: Browsers.ubuntu('Chrome'),
-    printQRInTerminal: false,
   })
 
   sock.ev.on('creds.update', saveCreds)
 
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update
+  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    if (qr) latestQR = qr
 
-    // WhatsApp is ready for pairing: ask for the code (once)
-    if (qr && !sock.authState.creds.registered && !pairingRequested) {
-      pairingRequested = true
-      try {
-        const code = await sock.requestPairingCode(PHONE)
-        console.log('=====================================')
-        console.log('PAIRING CODE:', code)
-        console.log('=====================================')
-      } catch (e) {
-        console.log('Could not get pairing code:', e.message)
-      }
+    if (connection === 'open') {
+      connected = true
+      latestQR = null
+      console.log('Connected to WhatsApp')
     }
 
-    if (connection === 'open') console.log('Connected to WhatsApp')
-
     if (connection === 'close') {
+      connected = false
       const code = lastDisconnect?.error?.output?.statusCode
       console.log('Connection closed. Reason code:', code)
       if (code === DisconnectReason.loggedOut) {
-        console.log('Logged out. Unlink the device and re-pair.')
+        console.log('Logged out. Change AUTH_DIR to a new name and redeploy.')
       } else {
         setTimeout(start, 5000)
       }
