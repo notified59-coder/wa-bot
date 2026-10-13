@@ -7,23 +7,30 @@ import makeWASocket, {
 import pino from 'pino'
 
 const KEYWORD = (process.env.KEYWORD || 'changeme').toLowerCase()
-const PHONE = process.env.PHONE_NUMBER
+const PHONE = (process.env.PHONE_NUMBER || '').replace(/\D/g, '')
 const AUTH_DIR = process.env.AUTH_DIR || './auth'
 
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
   const { version } = await fetchLatestBaileysVersion()
+  let pairingRequested = false
 
   const sock = makeWASocket({
     version,
     auth: state,
     logger: pino({ level: 'silent' }),
     browser: Browsers.ubuntu('Chrome'),
+    printQRInTerminal: false,
   })
 
-  // First-time login with a pairing code
-  if (!sock.authState.creds.registered) {
-    setTimeout(async () => {
+  sock.ev.on('creds.update', saveCreds)
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update
+
+    // WhatsApp is ready for pairing: ask for the code (once)
+    if (qr && !sock.authState.creds.registered && !pairingRequested) {
+      pairingRequested = true
       try {
         const code = await sock.requestPairingCode(PHONE)
         console.log('=====================================')
@@ -32,20 +39,17 @@ async function start() {
       } catch (e) {
         console.log('Could not get pairing code:', e.message)
       }
-    }, 3000)
-  }
+    }
 
-  sock.ev.on('creds.update', saveCreds)
-
-  sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
     if (connection === 'open') console.log('Connected to WhatsApp')
+
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode
+      console.log('Connection closed. Reason code:', code)
       if (code === DisconnectReason.loggedOut) {
-        console.log('Logged out. Unlink and re-pair.')
+        console.log('Logged out. Unlink the device and re-pair.')
       } else {
-        console.log('Reconnecting...')
-        start()
+        setTimeout(start, 5000)
       }
     }
   })
